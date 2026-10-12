@@ -1,0 +1,188 @@
+name: run-units
+
+# Manually dispatched. Runs explicit scientific work units (condition x replicate) in parallel shards.
+# A unit's simulated data, seeds and fit depend only on the unit itself, so shard assignment, job
+# order and retries cannot change any scientific result.
+
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "Study config"
+        required: true
+        default: configs/smoke.yaml
+      shards:
+        description: "Number of parallel shard jobs"
+        required: true
+        default: "3"
+      strategy:
+        description: "Shard strategy: balanced (cost-aware) | round_robin"
+        required: true
+        default: balanced
+      units:
+        description: "Optional explicit unit ids, space-separated (default: every unit of the config)"
+        required: false
+        default: ""
+      max_parallel:
+        description: "Maximum shard jobs running at once"
+        required: true
+        default: "3"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      labels: ${{ steps.plan.outputs.labels }}
+      study_id: ${{ steps.plan.outputs.study_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+      - name: Plan shards
+        id: plan
+        env:
+          CONFIG: ${{ inputs.config }}
+          SHARDS: ${{ inputs.shards }}
+          STRATEGY: ${{ inputs.strategy }}
+          UNITS: ${{ inputs.units }}
+        run: |
+          set -euo pipefail
+          unit_args=()
+          for u in $UNITS; do unit_args+=(--unit "$u"); done
+          python -m recovery2pl plan --config "$CONFIG" --shards "$SHARDS" --strategy "$STRATEGY" \
+            "${unit_args[@]}" --json plan.json
+          echo "labels=$(python -c 'import json; print(json.dumps([s["label"] for s in json.load(open("plan.json"))["shards"]]))')" >> "$GITHUB_OUTPUT"
+          echo "study_id=$(python -c 'import json; print(json.load(open("plan.json"))["study_id"])')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan-${{ steps.plan.outputs.study_id }}-a${{ github.run_attempt }}
+          path: plan.json
+          if-no-files-found: error
+
+  run:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.labels) }}
+    env:
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      CONFIG: ${{ inputs.config }}
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+      - name: Runner, compiler and PyTensor backend
+        run: |
+          python - <<'EOF'
+          import json, os, platform, subprocess
+          from recovery2pl import toolchain
+          toolchain.configure()
+          info = {"backend": toolchain.require_c_backend(), "nproc": os.cpu_count(),
+                  "platform": platform.platform(), "python": platform.python_version(),
+                  "cpu": subprocess.run(["bash", "-c", "lscpu | grep 'Model name' | head -1"],
+                                        capture_output=True, text=True).stdout.strip(),
+                  "mem": subprocess.run(["bash", "-c", "free -m | sed -n 2p"],
+                                        capture_output=True, text=True).stdout.strip(),
+                  "gxx": subprocess.run(["g++", "--version"], capture_output=True,
+                                        text=True).stdout.splitlines()[0]}
+          json.dump(info, open("runner_info.json", "w"), indent=1)
+          print(json.dumps(info, indent=1))
+          EOF
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan-${{ needs.plan.outputs.study_id }}-a${{ github.run_attempt }}
+      - name: Run this shard's units
+        run: |
+          set -euo pipefail
+          python -c "import json, os; s=[x for x in json.load(open('plan.json'))['shards'] if x['label']==os.environ['SHARD']][0]; open('units.txt','w').write('\n'.join(s['units'])+'\n')"
+          cat units.txt
+          python -W ignore::FutureWarning -m recovery2pl run --config "$CONFIG" --units-file units.txt --out results 2>&1 | tee run.log
+      - name: Upload shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ needs.plan.outputs.study_id }}-${{ matrix.shard }}-a${{ github.run_attempt }}
+          path: |
+            results/
+            runner_info.json
+            units.txt
+            run.log
+          if-no-files-found: error
+          retention-days: 30
+
+  merge:
+    needs: [plan, run]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan-${{ needs.plan.outputs.study_id }}-a${{ github.run_attempt }}
+          path: plan
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: results-${{ needs.plan.outputs.study_id }}-*
+          path: shards
+      - name: Collect, check every planned unit is present, aggregate
+        env:
+          CONFIG: ${{ inputs.config }}
+        run: |
+          set -euo pipefail
+          python -m recovery2pl collect --config "$CONFIG" --from shards --out merged
+          python - <<'EOF'
+          import json, pathlib, sys
+          plan = json.load(open("plan/plan.json"))
+          wanted = {u for s in plan["shards"] for u in s["units"]}
+          done = {f"{p.parent.name}__r{p.stem[len('rep_'):]}"
+                  for p in pathlib.Path("merged").rglob("rep_*.json")}
+          missing = sorted(wanted - done)
+          print(f"planned units: {len(wanted)}, collected: {len(done & wanted)}, missing: {len(missing)}")
+          if missing:
+              print("\n".join(missing[:50]))
+              sys.exit(1)
+          EOF
+          python -m recovery2pl aggregate --config "$CONFIG" --out merged
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: merged-${{ needs.plan.outputs.study_id }}-a${{ github.run_attempt }}
+          path: merged/
+          if-no-files-found: warn
+          retention-days: 30

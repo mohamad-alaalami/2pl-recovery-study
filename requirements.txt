@@ -1,0 +1,10 @@
+# Exact versions the study was developed and validated with (Python 3.10).
+# A C++ compiler is also required for PyTensor's C backend (see README).
+numpy==2.2.6
+scipy==1.15.3
+pandas==2.3.3
+pyarrow==25.0.1
+PyYAML==6.0.3
+pymc==5.25.1
+pytensor==2.31.7
+arviz==0.23.4

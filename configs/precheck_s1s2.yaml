@@ -1,0 +1,49 @@
+# Pre-check of the S1 and S2 conditions: 42 cells x 2 replicates = 84 units, to measure runtime and
+# fit behaviour before the full run. Every scientific setting equals configs/final_v1.yaml, so each
+# unit here has the same scientific hash (identical data, seeds and fit) as final_v1's replicates
+# r000-r001 of the same condition.
+study_id: precheck_s1s2_v1
+base_seed: 20261009
+
+item_generator:
+  kind: koenig2022
+  alpha_location: 1.0
+  beta_location: 0.0
+  aux_lower: [0.65, -4.5]
+  aux_upper: [4.0, 4.5]
+  accept_alpha: [0.45, 4.0]
+  accept_beta: [-4.5, 4.5]
+  center: truncated_mean
+  max_tries: 100000
+
+worlds:
+  small:   {tau_alpha: 0.10, tau_beta: 0.40}
+  typical: {tau_alpha: 0.25, tau_beta: 0.90}
+  extreme: {tau_alpha: 0.75, tau_beta: 1.50}
+
+populations:
+  S0: {difficulty_shift: 0.0, theta: {kind: normal}}
+  S1: {difficulty_shift: -1.5, theta: {kind: normal}}
+  S2: {difficulty_shift: -1.5, theta: {kind: skewnormal_standardized, shape: -4.0}}
+
+blocks:
+  - {name: S1, population: S1, worlds: [small, typical],
+     N: [50, 75, 100, 150, 200, 300, 500], test_length: [25, 50], rho: [0.3], replications: 2}
+  - {name: S2, population: S2, worlds: [typical],
+     N: [50, 75, 100, 150, 200, 300, 500], test_length: [25, 50], rho: [0.3], replications: 2}
+
+estimator:
+  kind: hierarchical_2pl_centered_b
+  priors: {mu_log_a_mean: 0.0, mu_log_a_sd: 0.5, sigma_log_a_scale: 0.5,
+           mu_b_mean: 0.0, mu_b_sd: 1.0, sigma_b_scale: 1.0}
+  sampler: {chains: 4, tune: 1000, draws: 1000, target_accept: 0.95, interval: 0.95}
+
+diagnostics: {rhat_max: 1.01, ess_bulk_min: 400, ess_tail_min: 400, max_divergences: 0, gross_rhat: 1.1}
+
+reporting:
+  item_error_tolerances: [0.2]
+  envelopes: []
+
+execution:
+  chain_cores: 4
+  threads_per_process: 1

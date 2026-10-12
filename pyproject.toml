@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recovery2pl"
+version = "0.1.0"
+description = "Monte Carlo parameter-recovery study for the 2PL IRT model: recovery error of item difficulty and discrimination versus responses per item."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy==2.2.6",
+    "scipy==1.15.3",
+    "pandas==2.3.3",
+    "pyarrow==25.0.1",
+    "PyYAML==6.0.3",
+    "pymc==5.25.1",
+    "pytensor==2.31.7",
+    "arviz==0.23.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

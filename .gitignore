@@ -1,0 +1,9 @@
+results/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+*.tmp
