@@ -103,6 +103,26 @@ class UnitCountTests(unittest.TestCase):
         self.assertEqual({k: v for k, v in diag["estimator"].items() if k != "kind"},
                          {k: v for k, v in pre["estimator"].items() if k != "kind"})
 
+    def test_fallback_validation_config_differs_from_precheck_only_in_estimator_kind(self):
+        import numpy as np
+        from recovery2pl.simulate import simulate_replicate
+        fb = load_config(CONFIGS / "diagnostic_fallback_noncentered_b.yaml")
+        pre = load_config(CONFIGS / "precheck_s1s2.yaml")
+        self.assertEqual({k: v for k, v in fb.items() if k not in ("study_id", "estimator")},
+                         {k: v for k, v in pre.items() if k not in ("study_id", "estimator")})
+        self.assertEqual(fb["estimator"]["kind"], "hierarchical_2pl_noncentered_b")
+        self.assertEqual({k: v for k, v in fb["estimator"].items() if k != "kind"},
+                         {k: v for k, v in pre["estimator"].items() if k != "kind"})
+        fu, pu = enumerate_units(fb), {u.unit_id: u for u in enumerate_units(pre)}
+        self.assertEqual([u.unit_id for u in fu], list(pu))
+        for u in fu[::7]:                                              # a spread of units
+            a = simulate_replicate(fb, u.condition, u.replicate)
+            b = simulate_replicate(pre, pu[u.unit_id].condition, u.replicate)
+            for k in ("a", "b", "theta", "Y"):
+                np.testing.assert_array_equal(a[k], b[k])
+            self.assertNotEqual(unit_scientific_hash(fb, u.condition),
+                                unit_scientific_hash(pre, pu[u.unit_id].condition))
+
     def test_hash_ignores_layout_but_not_science(self):
         c = final()
         u = enumerate_units(c)[0]
