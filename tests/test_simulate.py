@@ -1,5 +1,6 @@
 """Item-bank generator (Koenig et al. 2022 port), responses, seeding and the S0 port check."""
 import hashlib
+import sys
 import unittest
 from pathlib import Path
 
@@ -55,8 +56,32 @@ def sha(x):
     return hashlib.sha256(np.ascontiguousarray(x).tobytes()).hexdigest()
 
 
+GOLDEN_ARRAYS = Path(__file__).resolve().parent / "data" / "golden_s0_reference.npz"
+FLOAT_TOL = 1e-12        # cross-platform: floating-point rounding (BLAS, libm) may differ in the last bits
+
+
 class PortCheckTests(unittest.TestCase):
-    def test_reference_datasets_are_bit_identical_to_the_original_implementation(self):
+    """Reference datasets produced by the original implementation (generated on Windows x86-64).
+    On that reference platform they are reproduced bit for bit. On other platforms the seeds and
+    the response matrix Y must be identical and a, b, theta equal within FLOAT_TOL."""
+
+    def test_reference_datasets_match_the_original_implementation(self):
+        cfg = load_config(CONFIGS / "final_v1.yaml")
+        ref = np.load(GOLDEN_ARRAYS)
+        worst = {}
+        for u in resolve(cfg, list(GOLDEN_S0)):
+            sim = simulate_replicate(cfg, u.condition, u.replicate)
+            self.assertEqual(sim["sampler_seed"], int(ref[f"{u.unit_id}|sampler_seed"]))
+            np.testing.assert_array_equal(sim["Y"], ref[f"{u.unit_id}|Y"], err_msg=u.unit_id)
+            for k in ("a", "b", "theta"):
+                d = float(np.max(np.abs(sim[k] - ref[f"{u.unit_id}|{k}"])))
+                worst[k] = max(worst.get(k, 0.0), d)
+                self.assertLessEqual(d, FLOAT_TOL, f"{u.unit_id} {k}: max |diff| {d:.3e}")
+        print(f"\n[port check] platform={sys.platform}; max |diff| vs reference: "
+              + ", ".join(f"{k} {v:.3e}" for k, v in worst.items()))
+
+    @unittest.skipUnless(sys.platform == "win32", "bit-identity is checked on the reference platform")
+    def test_reference_datasets_are_bit_identical_on_the_reference_platform(self):
         cfg = load_config(CONFIGS / "final_v1.yaml")
         for u in resolve(cfg, list(GOLDEN_S0)):
             sim = simulate_replicate(cfg, u.condition, u.replicate)
