@@ -96,10 +96,22 @@ def _validate_population(name, p):
         _num(t["shape"], f"populations.{name}.theta.shape")
 
 
+FALLBACK_RULES = ("noncentered_b_if_divergent_or_gross",)
+
+
 def validate_estimator(est: dict) -> dict:
-    _exact(est, ("kind", "priors", "sampler"), "estimator")
+    """`fallback` is optional. Absent = a single fit (the protocol of every config before the fallback
+    was frozen, whose scientific hashes are therefore unchanged). `noncentered_b_if_divergent_or_gross`
+    = the frozen study protocol: centered-b first, non-centered-b refit when the centered fit is
+    divergent or gross, canonical result chosen by Policy-D tier only (ties -> centered)."""
+    _exact({k: v for k, v in est.items() if k != "fallback"}, ("kind", "priors", "sampler"), "estimator")
     if est["kind"] not in ESTIMATOR_KINDS:
         raise ConfigError(f"estimator.kind must be one of {ESTIMATOR_KINDS}")
+    if "fallback" in est:
+        if est["fallback"] not in FALLBACK_RULES:
+            raise ConfigError(f"estimator.fallback must be one of {FALLBACK_RULES}")
+        if est["kind"] != "hierarchical_2pl_centered_b":
+            raise ConfigError("estimator.fallback requires kind hierarchical_2pl_centered_b")
     pr = est["priors"]
     _exact(pr, PRIOR_FIELDS, "estimator.priors")
     for f in PRIOR_FIELDS:
@@ -226,11 +238,22 @@ def _digest(obj) -> str:
     return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()[:16]
 
 
+def simulation_hash(config: dict, cond) -> str:
+    """Identity of the GENERATED DATASET of a condition (with the replicate index it fixes a unit's
+    data): seed base, item generator, world, population and condition id -- nothing about the fit.
+    Equal simulation hashes + equal replicate => identical simulated a, b, theta and Y."""
+    return _digest({"base_seed": config["base_seed"], "item_generator": config["item_generator"],
+                    "world": config["worlds"][cond.world],
+                    "population": config["populations"][cond.population],
+                    "condition_id": cond.condition_id})
+
+
 def unit_scientific_hash(config: dict, cond) -> str:
     """Identity of everything that determines ONE unit's numbers: seed base, item generator, the
-    condition's world, population definition, estimator and diagnostic rules. Block layout,
-    replication counts, reporting and execution settings are excluded, so adding replicates or
-    blocks never invalidates finished units."""
+    condition's world, population definition, estimator (including its fallback protocol) and
+    diagnostic rules. Block layout, replication counts, reporting and execution settings are
+    excluded, so adding replicates or blocks never invalidates finished units. Configs without
+    estimator.fallback keep the hashes they had before the fallback existed."""
     return _digest({"base_seed": config["base_seed"],
                     "item_generator": config["item_generator"],
                     "world": config["worlds"][cond.world],

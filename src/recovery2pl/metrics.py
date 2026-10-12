@@ -33,8 +33,11 @@ SUBSETS = {"primary": ("clean", "mixing_flag", "divergent"),
            "no_divergent": ("clean", "mixing_flag"),
            "strict": ("clean",)}
 STATS = ("mean", "sd", "mc_se", "median", "q05", "q10", "q90", "q95")
-NON_METRIC = set(CONDITION_KEYS) | {"unit_id", "block", "replicate", "tier", "mse_b", "mse_a",
-                                    "mse_log_a"}
+PROTOCOL_KEYS = ("initial_tier", "fallback_triggered", "fallback_tier", "canonical_parameterization")
+NON_METRIC = set(CONDITION_KEYS) | set(PROTOCOL_KEYS) | {"unit_id", "block", "replicate", "tier",
+                                                          "mse_b", "mse_a", "mse_log_a"}
+PROTOCOL_DEFAULTS = {"initial_tier": None, "fallback_triggered": False, "fallback_tier": "",
+                     "canonical_parameterization": "centered_b"}   # results from before the fallback
 
 
 def _tol_label(d: float) -> str:
@@ -60,6 +63,9 @@ def replicate_metrics(items: pd.DataFrame, tolerances=(0.2,)) -> pd.DataFrame:
         row = {k: first[k] for k in CONDITION_KEYS}
         row.update(unit_id=unit_id, block=first["block"], replicate=int(first["replicate"]),
                    tier=first["tier"])
+        for k, default in PROTOCOL_DEFAULTS.items():            # fit-protocol outcome of the unit
+            row[k] = first[k] if k in g.columns else (first["tier"] if k == "initial_tier" else default)
+        row["fallback_triggered"] = bool(row["fallback_triggered"])
         if first["tier"] == "gross" or not np.all(np.isfinite(g["est_a"])) \
                 or not np.all(np.isfinite(g["est_b"])):
             rows.append(row)                                  # kept and counted, no metrics
@@ -103,6 +109,7 @@ def summarize(rep: pd.DataFrame, subset: str = "primary") -> pd.DataFrame:
         row["units"] = len(g)
         for t in ("clean", "mixing_flag", "divergent", "gross"):
             row[f"n_{t}"] = int(counts.get(t, 0))
+        row.update(fallback_counts(g))
         used = g[g["tier"].isin(SUBSETS[subset])]
         row["subset"], row["n_used"] = subset, len(used)
         for m in metrics:
@@ -119,6 +126,36 @@ def summarize(rep: pd.DataFrame, subset: str = "primary") -> pd.DataFrame:
             row[f"rmse_{p}_pooled"] = float(np.sqrt(mse.mean())) if len(mse) else np.nan
         out.append(row)
     return pd.DataFrame(out)
+
+
+def fallback_counts(g: pd.DataFrame) -> dict:
+    """Fit-protocol bookkeeping for a set of units (canonical tiers are counted separately):
+    triggered = centered divergent/gross -> non-centered refit; rescued = non-centered canonical;
+    unresolved = triggered and the canonical fit is still divergent or gross."""
+    trig = g["fallback_triggered"].astype(bool)
+    rescued = trig & (g["canonical_parameterization"] == "noncentered_b")
+    unresolved = trig & g["tier"].isin(["divergent", "gross"])
+    n = len(g)
+    return {"n_fallback_triggered": int(trig.sum()), "n_fallback_rescued": int(rescued.sum()),
+            "n_fallback_unresolved": int(unresolved.sum()),
+            "fallback_trigger_rate": float(trig.mean()) if n else np.nan,
+            "n_canonical_centered": int((g["canonical_parameterization"] == "centered_b").sum()),
+            "n_canonical_noncentered": int((g["canonical_parameterization"] == "noncentered_b").sum())}
+
+
+def fallback_report(rep: pd.DataFrame) -> pd.DataFrame:
+    """Per condition: fallback trigger / rescue / unresolved counts and canonical parameterization
+    counts, plus initial (centered) and canonical tier counts."""
+    rows = []
+    for key, g in rep.groupby(CONDITION_KEYS, sort=True, dropna=False):
+        row = dict(zip(CONDITION_KEYS, key))
+        row["units"] = len(g)
+        row.update(fallback_counts(g))
+        for t in ("clean", "mixing_flag", "divergent", "gross"):
+            row[f"initial_{t}"] = int((g["initial_tier"] == t).sum())
+            row[f"canonical_{t}"] = int((g["tier"] == t).sum())
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def upper_envelope(summary: pd.DataFrame, stat: str, populations=None, worlds=None) -> pd.DataFrame:

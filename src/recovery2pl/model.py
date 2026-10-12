@@ -9,11 +9,11 @@
 
 The model sees only the response matrix Y; true parameters are used afterwards, for recovery.
 
-estimator.kind selects the difficulty parameterization:
-    hierarchical_2pl_centered_b      b ~ N(mu_b, sigma_b)                 (the study's estimator)
+Difficulty parameterization (same model and posterior, different sampling geometry):
+    hierarchical_2pl_centered_b      b ~ N(mu_b, sigma_b)                 (default, fitted first)
     hierarchical_2pl_noncentered_b   b = mu_b + sigma_b * z_b, z_b ~ N(0, 1)
-                                     (DIAGNOSTIC variant only: same model and posterior, different
-                                      sampling geometry; everything else identical)
+                                     (the automatic fallback of recovery2pl.fallback; also usable
+                                      alone for diagnostics)
 
 Diagnostics (Vehtari et al. 2021, rank-normalized): split R-hat, bulk-ESS and tail-ESS over every
 item parameter (a, b) and every hyperparameter; divergences; E-BFMI; max-treedepth hits; theta
@@ -41,7 +41,7 @@ import pymc as pm  # noqa: E402
 
 GROUP_VARS = ["mu_log_a", "sigma_log_a", "mu_b", "sigma_b"]
 TIERS = ("clean", "mixing_flag", "divergent", "gross")
-CENTERED, NONCENTERED = "hierarchical_2pl_centered_b", "hierarchical_2pl_noncentered_b"
+from recovery2pl.fallback import CENTERED, NONCENTERED  # noqa: E402
 
 
 def build_model(Y: np.ndarray, priors: dict, kind: str = CENTERED) -> pm.Model:

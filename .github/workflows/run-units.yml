@@ -27,6 +27,10 @@ on:
         description: "Maximum shard jobs running at once"
         required: true
         default: "3"
+      max_shard_hours:
+        description: "Worst-case hours per shard job (every unit assumed to need the fallback refit); GitHub's limit is 6"
+        required: true
+        default: "4"
 
 permissions:
   contents: read
@@ -56,12 +60,13 @@ jobs:
           SHARDS: ${{ inputs.shards }}
           STRATEGY: ${{ inputs.strategy }}
           UNITS: ${{ inputs.units }}
+          MAXH: ${{ inputs.max_shard_hours }}
         run: |
           set -euo pipefail
           unit_args=()
           for u in $UNITS; do unit_args+=(--unit "$u"); done
           python -m recovery2pl plan --config "$CONFIG" --shards "$SHARDS" --strategy "$STRATEGY" \
-            "${unit_args[@]}" --json plan.json
+            --max-shard-hours "$MAXH" "${unit_args[@]}" --json plan.json
           echo "labels=$(python -c 'import json; print(json.dumps([s["label"] for s in json.load(open("plan.json"))["shards"]]))')" >> "$GITHUB_OUTPUT"
           echo "study_id=$(python -c 'import json; print(json.load(open("plan.json"))["study_id"])')" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4

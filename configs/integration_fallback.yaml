@@ -1,0 +1,77 @@
+# INTEGRATION TEST ONLY -- identical to configs/final_v1.yaml except study_id (tests assert this), so
+# units run here are scientifically the final-study units (same hashes) but are stored under their
+# own study id and are never part of the final results.
+# 2PL parameter-recovery study: final design.
+#   S0 reference population x small/typical item worlds       R = 100
+#   S0 reference population x extreme item world (stress)     R = 20
+#   S1 off-target (easy) bank, small/typical, rho = 0.3       R = 100
+#   S2 off-target bank + skewed abilities (stress), typical    R = 50
+# Units: 5600 + 560 + 2800 + 700 = 9660.
+study_id: integration_fallback_v1
+base_seed: 20261009
+
+item_generator:                     # Koenig, Spoden & Frey (2022); OSF m3zaq, cauchy1.R
+  kind: koenig2022
+  alpha_location: 1.0               # location of the auxiliary truncated normal (raw alpha scale)
+  beta_location: 0.0
+  aux_lower: [0.65, -4.5]           # truncation of the auxiliary draw (alpha, beta)
+  aux_upper: [4.0, 4.5]
+  accept_alpha: [0.45, 4.0]         # whole-replicate rejection bounds (open intervals)
+  accept_beta: [-4.5, 4.5]
+  center: truncated_mean
+  max_tries: 100000
+
+worlds:                             # item heterogeneity: SDs of raw alpha and of beta
+  small:   {tau_alpha: 0.10, tau_beta: 0.40}
+  typical: {tau_alpha: 0.25, tau_beta: 0.90}
+  extreme: {tau_alpha: 0.75, tau_beta: 1.50}
+
+populations:                        # applied after the item bank is generated and validated
+  S0: {difficulty_shift: 0.0, theta: {kind: normal}}                            # reference
+  S1: {difficulty_shift: -1.5, theta: {kind: normal}}                           # easy bank
+  S2: {difficulty_shift: -1.5, theta: {kind: skewnormal_standardized, shape: -4.0}}   # + skew ~ -0.78
+
+blocks:
+  - {name: S0_main, population: S0, worlds: [small, typical],
+     N: [50, 75, 100, 150, 200, 300, 500], test_length: [25, 50], rho: [0.0, 0.3], replications: 100}
+  - {name: S0_extreme, population: S0, worlds: [extreme],
+     N: [50, 75, 100, 150, 200, 300, 500], test_length: [25, 50], rho: [0.0, 0.3], replications: 20}
+  - {name: S1, population: S1, worlds: [small, typical],
+     N: [50, 75, 100, 150, 200, 300, 500], test_length: [25, 50], rho: [0.3], replications: 100}
+  - {name: S2, population: S2, worlds: [typical],
+     N: [50, 75, 100, 150, 200, 300, 500], test_length: [25, 50], rho: [0.3], replications: 50}
+
+estimator:                          # hierarchical 2PL, centered difficulty hierarchy
+  kind: hierarchical_2pl_centered_b
+  fallback: noncentered_b_if_divergent_or_gross   # frozen protocol: refit divergent/gross centered
+                                                  # fits with non-centered b; canonical by Policy-D
+                                                  # tier only, ties keep centered
+  priors:
+    mu_log_a_mean: 0.0
+    mu_log_a_sd: 0.5
+    sigma_log_a_scale: 0.5          # HalfNormal scale
+    mu_b_mean: 0.0
+    mu_b_sd: 1.0
+    sigma_b_scale: 1.0              # HalfNormal scale
+  sampler:
+    chains: 4
+    tune: 1000
+    draws: 1000
+    target_accept: 0.95
+    interval: 0.95                  # equal-tailed posterior interval (coverage, width)
+
+diagnostics:                        # fit tiers; no recovery-error threshold exists anywhere
+  rhat_max: 1.01                    # mixing_flag above this
+  ess_bulk_min: 400
+  ess_tail_min: 400
+  max_divergences: 0                # divergent above this
+  gross_rhat: 1.1                   # gross above this
+
+reporting:
+  item_error_tolerances: [0.2]      # descriptive share-of-items-within-tolerance only
+  envelopes:                        # per-N maximum of condition means, primary subset
+    - {name: main, populations: [S0, S1], worlds: [small, typical]}
+
+execution:                          # does not affect results
+  chain_cores: 4                    # sampler chains run in parallel within one unit
+  threads_per_process: 1

@@ -72,16 +72,26 @@ def shard(units: list, index: int, of: int) -> list:
     return [u for k, u in enumerate(units) if k % of == index]
 
 
-def estimated_cost(cond: Condition) -> float:
-    """PROVISIONAL relative cost of fitting one unit, used only to balance shards (never affects
-    results). Fit time grows roughly with the number of responses N*J; in the extreme item world
-    it grows much faster with N (near-deterministic items make sampling harder): a factor rising
-    log-linearly from 1 at N=50 to 10 at N=500. To be recalibrated from measured unit timings."""
-    base = 20.0 + cond.N * cond.test_length / 100.0
+EXTREME_FACTOR_AT_500 = 25.0       # conservative (measured locally: about 10-24x; cloud unmeasured)
+FALLBACK_WORST_CASE = 2.0          # a unit may need a second full fit (fallback); assume it does
+
+
+def expected_fit_seconds(cond: Condition) -> float:
+    """One fit's wall time on a 4-vCPU hosted runner (4 chains in parallel), calibrated on the
+    measured small/typical-world cloud fits (about 19 s at N*J = 1,250 to 200 s at 25,000). Extreme
+    world: multiplied by a factor rising log-linearly in N from 1 at N=50 to EXTREME_FACTOR_AT_500,
+    deliberately conservative. Used only for scheduling; never affects results."""
+    secs = 10.0 + 0.0076 * cond.N * cond.test_length
     if cond.world == "extreme":
         frac = min(max(np.log(cond.N / 50.0) / np.log(10.0), 0.0), 1.0)
-        base *= 10.0 ** frac
-    return float(base)
+        secs *= EXTREME_FACTOR_AT_500 ** frac
+    return float(secs)
+
+
+def estimated_cost(cond: Condition) -> float:
+    """Worst-case seconds for one UNIT: the centered fit plus a full fallback refit (which units
+    trigger the fallback is unknown in advance)."""
+    return FALLBACK_WORST_CASE * expected_fit_seconds(cond)
 
 
 def balanced_shards(units: list, of: int, cost=estimated_cost) -> list:
@@ -99,8 +109,15 @@ def balanced_shards(units: list, of: int, cost=estimated_cost) -> list:
     return shards
 
 
-def plan(units: list, of: int, strategy: str) -> list:
-    """[{label, units: [ids], estimated_cost}] for `of` shards; labels sNNNofMMM."""
+JOB_OVERHEAD_SECONDS = 180.0     # setup, install and one-time C compilation per job (measured ~65 s)
+MAX_MATRIX_JOBS = 256            # GitHub Actions matrix limit per workflow run
+
+
+def plan(units: list, of: int, strategy: str, max_shard_seconds: float = None) -> list:
+    """[{label, units: [ids], estimated_cost, worst_case_hours}] for `of` shards (labels
+    sNNNofMMM). estimated_cost is the worst-case seconds of the shard's units (every unit assumed to
+    need the fallback refit). With `max_shard_seconds`, every shard's worst case plus job overhead
+    must fit the budget, otherwise ValueError (use more shards, see shards_for_budget)."""
     if strategy == "round_robin":
         parts = [shard(units, i, of) for i in range(of)]
     elif strategy == "balanced":
@@ -108,9 +125,34 @@ def plan(units: list, of: int, strategy: str) -> list:
     else:
         raise ValueError(f"unknown strategy {strategy!r} (round_robin | balanced)")
     width = max(3, len(str(of)))
-    return [{"label": f"s{i:0{width}d}of{of:0{width}d}", "units": [u.unit_id for u in p],
-             "estimated_cost": round(sum(estimated_cost(u.condition) for u in p), 1)}
-            for i, p in enumerate(parts) if p]
+    out = []
+    for i, p in enumerate(parts):
+        if not p:
+            continue
+        cost = sum(estimated_cost(u.condition) for u in p)
+        worst = cost + JOB_OVERHEAD_SECONDS
+        if max_shard_seconds is not None and worst > max_shard_seconds:
+            raise ValueError(f"shard {i} worst case {worst / 3600:.2f} h exceeds the budget "
+                             f"{max_shard_seconds / 3600:.2f} h; use more shards")
+        out.append({"label": f"s{i:0{width}d}of{of:0{width}d}", "units": [u.unit_id for u in p],
+                    "estimated_cost": round(cost, 1), "worst_case_hours": round(worst / 3600, 3)})
+    return out
+
+
+def shards_for_budget(units: list, max_shard_seconds: float, minimum: int = 1) -> int:
+    """Smallest shard count >= minimum whose balanced plan keeps every shard's worst case (all units
+    needing the fallback refit, plus job overhead) within the budget."""
+    biggest = max(estimated_cost(u.condition) for u in units) + JOB_OVERHEAD_SECONDS
+    if biggest > max_shard_seconds:
+        raise ValueError(f"a single unit's worst case ({biggest / 3600:.2f} h) exceeds the budget")
+    total = sum(estimated_cost(u.condition) for u in units)
+    k = max(minimum, int(np.ceil(total / (max_shard_seconds - JOB_OVERHEAD_SECONDS))))
+    while True:
+        try:
+            plan(units, k, "balanced", max_shard_seconds)
+            return k
+        except ValueError:
+            k += 1
 
 
 def resolve(config: dict, unit_ids) -> list:

@@ -17,7 +17,7 @@ from recovery2pl.units import enumerate_units, parse_unit_id, resolve, shard
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 
 
-def fake_fit(Y, config, seed):
+def fake_fit(Y, config, seed, kind="hierarchical_2pl_centered_b"):
     """Deterministic stand-in for the sampler: estimates are a function of Y and the seed only."""
     rng = np.random.default_rng(seed)
     J = Y.shape[1]
@@ -138,8 +138,8 @@ class RunnerTests(unittest.TestCase):
         import shutil
         from recovery2pl.runner import collect
 
-        def other_cpu_fit(Y, config, seed):          # same unit, numerically different posterior
-            d = fake_fit(Y, config, seed)
+        def other_cpu_fit(Y, config, seed, kind="hierarchical_2pl_centered_b"):   # other CPU: different posterior draws
+            d = fake_fit(Y, config, seed, kind)
             d["est_b"] = d["est_b"] + 0.05
             return d
 
@@ -150,7 +150,8 @@ class RunnerTests(unittest.TestCase):
         merged = self.out / "merged"
         res = collect([a, b, c], merged, "smoke")
         self.assertEqual(res, {"copied": 3, "same_execution_copies": 2,
-                               "logged_duplicate_executions": 1, "previously_logged_duplicates": 0})
+                               "logged_duplicate_executions": 1, "previously_logged_duplicates": 0,
+                               "failure_records": 0})
         sdir = merged / "smoke"
         self.assertEqual(len(list((sdir / "units").rglob("rep_*.json"))), 3)
         # canonical = earliest finished (ties: first source path) -> artifact_a; never averaged

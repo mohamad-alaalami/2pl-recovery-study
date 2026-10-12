@@ -16,7 +16,7 @@ def final():
 
 class ConfigValidationTests(unittest.TestCase):
     def test_shipped_configs_are_valid(self):
-        for name in ("final_v1.yaml", "precheck_s1s2.yaml", "smoke.yaml",
+        for name in ("final_v1.yaml", "precheck_s1s2.yaml", "smoke.yaml", "integration_fallback.yaml",
                      "diagnostic_s1_small_lowN_noncentered_b.yaml"):
             load_config(CONFIGS / name)
 
@@ -68,17 +68,44 @@ class UnitCountTests(unittest.TestCase):
         self.assertEqual({(c.world, c.rho) for c in s2}, {("typical", 0.3)})
         self.assertEqual({c.test_length for c in s1 + s2}, {25, 50})
 
-    def test_precheck_has_84_units_identical_in_science_to_final(self):
+    def test_precheck_units_share_data_identity_but_not_fit_protocol_with_final(self):
+        from recovery2pl.config import simulation_hash
         pre = load_config(CONFIGS / "precheck_s1s2.yaml")
         units = enumerate_units(pre)
         self.assertEqual(len(units), 84)
         self.assertEqual(len({u.condition.condition_id for u in units}), 42)
         fin = final()
         fin_units = {u.unit_id: u for u in enumerate_units(fin)}
-        for u in units:                                     # same unit id and same scientific hash
+        for u in units:
             self.assertIn(u.unit_id, fin_units)
-            self.assertEqual(unit_scientific_hash(pre, u.condition),
-                             unit_scientific_hash(fin, fin_units[u.unit_id].condition))
+            fc = fin_units[u.unit_id].condition
+            self.assertEqual(simulation_hash(pre, u.condition), simulation_hash(fin, fc))   # same data
+            self.assertNotEqual(unit_scientific_hash(pre, u.condition),                     # centered-only
+                                unit_scientific_hash(fin, fc))                              # != fallback
+
+    def test_centered_only_configs_keep_their_pre_fallback_hashes(self):
+        """Results produced before the fallback existed must still match their own configs."""
+        pre = load_config(CONFIGS / "precheck_s1s2.yaml")
+        known = {"N50_J25_small_rho0.3_full_S1__r000": "91d2beabd7c4bcfe",     # pre-check run hashes
+                 "N75_J25_typical_rho0.3_full_S2__r000": "c9f1e92981d2eb97"}
+        for u in enumerate_units(pre):
+            if u.unit_id in known:
+                self.assertEqual(unit_scientific_hash(pre, u.condition), known[u.unit_id])
+
+    def test_integration_config_is_final_v1_except_study_id(self):
+        integ = load_config(CONFIGS / "integration_fallback.yaml")
+        fin = final()
+        self.assertEqual({k: v for k, v in integ.items() if k != "study_id"},
+                         {k: v for k, v in fin.items() if k != "study_id"})
+        self.assertEqual(fin["estimator"]["fallback"], "noncentered_b_if_divergent_or_gross")
+
+    def test_fallback_field_validation(self):
+        for mutate in (lambda d: d["estimator"].update(fallback="always_noncentered"),
+                       lambda d: d["estimator"].update(kind="hierarchical_2pl_noncentered_b")):
+            d = copy.deepcopy(final())
+            mutate(d)
+            with self.assertRaises(ConfigError):
+                validate_config(d)
 
     def test_noncentered_diagnostic_reuses_the_canonical_datasets_but_never_their_hash(self):
         import numpy as np

@@ -40,6 +40,9 @@ blocks:
 
 estimator:                          # hierarchical 2PL, centered difficulty hierarchy
   kind: hierarchical_2pl_centered_b
+  fallback: noncentered_b_if_divergent_or_gross   # frozen protocol: refit divergent/gross centered
+                                                  # fits with non-centered b; canonical by Policy-D
+                                                  # tier only, ties keep centered
   priors:
     mu_log_a_mean: 0.0
     mu_log_a_sd: 0.5

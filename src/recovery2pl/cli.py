@@ -53,13 +53,14 @@ def load_results(out_root, study_id: str):
 
 
 def cmd_aggregate(config, out_root) -> dict:
-    from recovery2pl.metrics import replicate_metrics, summarize, upper_envelope
+    from recovery2pl.metrics import fallback_report, replicate_metrics, summarize, upper_envelope
     sdir = Path(out_root) / config["study_id"]
     items, diags = load_results(out_root, config["study_id"])
     rep = replicate_metrics(items, config["reporting"]["item_error_tolerances"])
     rep.to_csv(sdir / "replicate_metrics.csv", index=False)
-    diags.drop(columns=["hyper"], errors="ignore").to_csv(sdir / "fit_diagnostics.csv", index=False)
-    written = ["replicate_metrics.csv", "fit_diagnostics.csv"]
+    diags.drop(columns=["hyper", "attempts"], errors="ignore").to_csv(sdir / "fit_diagnostics.csv", index=False)
+    fallback_report(rep).to_csv(sdir / "fallback_report.csv", index=False)
+    written = ["replicate_metrics.csv", "fit_diagnostics.csv", "fallback_report.csv"]
     for subset in ("primary", "no_divergent", "strict"):
         summ = summarize(rep, subset)
         summ.to_csv(sdir / f"summary_{subset}.csv", index=False)
@@ -82,6 +83,9 @@ def main(argv=None) -> int:
     ap.add_argument("--shards", type=int)
     ap.add_argument("--strategy", default="balanced", choices=["balanced", "round_robin"])
     ap.add_argument("--json")
+    ap.add_argument("--max-shard-hours", type=float, default=4.0,
+                    help="worst-case hours per shard job (GitHub limit: 6 h); balanced plans add "
+                         "shards until every shard fits")
     ap.add_argument("--from", dest="sources", nargs="+")
     ap.add_argument("--config", required=True)
     ap.add_argument("--block", action="append")
@@ -113,15 +117,25 @@ def main(argv=None) -> int:
                               "theta_mean": float(sim["theta"].mean()),
                               "b_mean": float(sim["b"].mean())}, indent=2))
     elif args.command == "plan":
-        from recovery2pl.units import plan
+        from recovery2pl.units import MAX_MATRIX_JOBS, plan, shards_for_budget
         if not args.shards or not args.json:
             raise SystemExit("plan: give --shards and --json")
         units = resolve(config, args.unit) if args.unit else _units(config, args)
+        budget = args.max_shard_hours * 3600
+        k = args.shards
+        if args.strategy == "balanced":
+            k = shards_for_budget(units, budget, minimum=min(args.shards, len(units)))
+        if k > MAX_MATRIX_JOBS:
+            raise SystemExit(f"plan: {k} shards needed for a {args.max_shard_hours} h budget exceed "
+                             f"the {MAX_MATRIX_JOBS}-job matrix limit; plan blocks separately (--block)")
         doc = {"study_id": config["study_id"], "config": args.config, "strategy": args.strategy,
-               "n_units": len(units), "shards": plan(units, args.shards, args.strategy)}
+               "max_shard_hours": args.max_shard_hours, "n_units": len(units),
+               "shards": plan(units, k, args.strategy, budget)}
         Path(args.json).write_text(json.dumps(doc, indent=1), encoding="utf-8")
         print(json.dumps({"study_id": doc["study_id"], "n_units": doc["n_units"],
-                          "shards": [(s["label"], len(s["units"]), s["estimated_cost"])
+                          "n_shards": len(doc["shards"]), "max_shard_hours": args.max_shard_hours,
+                          "worst_case_hours_max": max(s["worst_case_hours"] for s in doc["shards"]),
+                          "shards": [(s["label"], len(s["units"]), s["worst_case_hours"])
                                      for s in doc["shards"]]}))
     elif args.command == "collect":
         if not args.sources or not args.out:

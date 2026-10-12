@@ -2,8 +2,11 @@
 
 Layout under an output root:
     <out>/<study_id>/study.json                            config copy (written once, verified after)
-    <out>/<study_id>/units/<condition_id>/rep_XXX.parquet  item rows: true / estimate / interval
-    <out>/<study_id>/units/<condition_id>/rep_XXX.json     fit diagnostics, tier, seeds, hash
+    <out>/<study_id>/units/<condition_id>/rep_XXX.parquet  item rows: truth, canonical estimates,
+                                                           every attempt's estimates
+    <out>/<study_id>/units/<condition_id>/rep_XXX.json     canonical diagnostics, fit protocol,
+                                                           per-attempt diagnostics, seeds, hashes
+    <out>/<study_id>/failures/<condition_id>/...json       sampler/program failures (unit stays pending)
 
 Both files are written atomically (temp file + rename); the .json is written LAST and marks the
 unit complete. A complete unit whose scientific hash matches is skipped; a hash mismatch raises and
@@ -21,7 +24,9 @@ from pathlib import Path
 import pandas as pd
 
 from recovery2pl import __version__
-from recovery2pl.config import unit_scientific_hash
+from recovery2pl.config import simulation_hash, unit_scientific_hash
+from recovery2pl.fallback import (CENTERED, LABEL, NONCENTERED, RULE, plan_for, select_canonical,
+                                  triggers)
 from recovery2pl.simulate import simulate_replicate
 
 THREAD_ENV = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS")
@@ -68,21 +73,90 @@ def unit_status(config: dict, unit, out_root) -> str:
     return "done" if pq.exists() else "pending"
 
 
-def _default_fit(Y, config, seed):
+DIAG_KEYS = ("tier", "error", "seconds", "backend", "rhat_max", "ess_bulk_min", "ess_tail_min",
+             "rhat_max_group", "ess_bulk_min_group", "theta_rhat_max", "theta_ess_bulk_min",
+             "divergences", "divergence_share", "ebfmi_min", "treedepth_hits", "hyper")
+ITEM_KEYS = ("est_a", "lo_a", "hi_a", "sd_a", "rhat_a", "est_b", "lo_b", "hi_b", "sd_b", "rhat_b",
+             "est_log_a")
+
+
+class UnitFailure(RuntimeError):
+    """A program/sampler/runtime failure (NOT a Policy-D gross fit): the unit is not written, a
+    failure record is kept, and the unit stays pending so it can be retried."""
+
+    def __init__(self, message: str, kind: str = "sampler_error"):
+        super().__init__(message)
+        self.kind = kind
+
+
+def _default_fit(Y, config, seed, kind):
     from recovery2pl.model import fit_2pl                      # PyMC is heavy: import lazily
-    return fit_2pl(Y, config["estimator"], config["diagnostics"], seed,
-                   cores=config["execution"]["chain_cores"])
+    est = {k: v for k, v in config["estimator"].items() if k != "fallback"}
+    est["kind"] = kind
+    return fit_2pl(Y, est, config["diagnostics"], seed, cores=config["execution"]["chain_cores"])
+
+
+def _attempt_record(fit: dict, kind: str, position) -> dict:
+    return {"parameterization": LABEL[kind], "estimator_kind": kind,
+            **{k: fit.get(k) for k in DIAG_KEYS}, "runner": runner_metadata(),
+            "position_in_batch": position, "finished_at": _now()}
+
+
+def _record_failure(config, unit, out_root, attempts: dict, failed_kind: str, error) -> None:
+    d = Path(out_root) / config["study_id"] / "failures" / unit.condition.condition_id
+    d.mkdir(parents=True, exist_ok=True)
+    stamp = _now().replace(":", "")
+    _atomic_write_text(d / f"rep_{unit.replicate:03d}__{stamp}.json", json.dumps(
+        {"unit_id": unit.unit_id, "failed_attempt": LABEL[failed_kind], "error": str(error),
+         "attempts": attempts, "scientific_hash": unit_scientific_hash(config, unit.condition),
+         "recorded_at": _now()}, indent=2, default=float))
 
 
 def run_unit(config: dict, unit, out_root, fit_fn=None, position: int = None) -> dict:
-    """Simulate + fit + persist one unit. `fit_fn(Y, config, seed) -> dict` is injectable (tests).
-    `position` (1-based order within this process's batch) is recorded: the first fit of a fresh
-    process also pays the one-time C compilation."""
+    """Simulate once, fit under the configured protocol, persist one unit.
+
+    Protocol (recovery2pl.fallback): fit the configured estimator; if the config enables the frozen
+    fallback and the first fit is divergent or gross, refit the SAME dataset with non-centered b and
+    pick the canonical fit by Policy-D tier only (ties keep the first fit). Both attempts are kept:
+    canonical estimates in the standard columns, every attempt's item estimates in
+    `<parameterization>__<column>` columns, every attempt's diagnostics in the json.
+
+    A sampler/program exception in ANY attempt is a UnitFailure, not a gross fit: nothing is written
+    for the unit (it stays pending for a retry), a failure record is kept under <study>/failures/,
+    and the exception is raised. `fit_fn(Y, config, seed, kind) -> dict` is injectable (tests)."""
     fit_fn = fit_fn or _default_fit
     cond, rep = unit.condition, unit.replicate
     pq, js = unit_paths(out_root, config["study_id"], unit)
-    sim = simulate_replicate(config, cond, rep)
-    fit = fit_fn(sim["Y"], config, sim["sampler_seed"])
+    sim = simulate_replicate(config, cond, rep)              # simulated ONCE; every attempt reuses it
+    first_kind, fallback_enabled = plan_for(config)
+    fits, attempts = {}, {}
+
+    def attempt(kind):
+        fit = fit_fn(sim["Y"], config, sim["sampler_seed"], kind)   # same data, same seed
+        attempts[LABEL[kind]] = _attempt_record(fit, kind, position)
+        if fit.get("error"):
+            _record_failure(config, unit, out_root, attempts, kind, fit["error"])
+            raise UnitFailure(f"{unit.unit_id}: {LABEL[kind]} attempt failed: {fit['error']}")
+        fits[kind] = fit
+
+    attempt(first_kind)
+    initial_tier = fits[first_kind]["tier"]
+    triggered = first_kind == CENTERED and fallback_enabled and triggers(initial_tier)
+    if triggered:
+        attempt(NONCENTERED)
+    if first_kind == CENTERED and fallback_enabled:
+        canonical_label, reason = select_canonical(initial_tier, fits[NONCENTERED]["tier"] if triggered else None)
+    else:
+        canonical_label, reason = LABEL[first_kind], "single-fit protocol (no fallback configured)"
+    canonical = fits[CENTERED if canonical_label == LABEL[CENTERED] else NONCENTERED]
+    protocol = {"rule": RULE if fallback_enabled else None,
+                "initial_parameterization": LABEL[first_kind], "initial_tier": initial_tier,
+                "fallback_triggered": triggered,
+                "fallback_parameterization": LABEL[NONCENTERED] if triggered else None,
+                "fallback_tier": fits[NONCENTERED]["tier"] if triggered else None,
+                "canonical_parameterization": canonical_label, "canonical_tier": canonical["tier"],
+                "selection_reason": reason}
+
     J = cond.test_length
     nan = float("nan")
     rows = pd.DataFrame({
@@ -90,26 +164,28 @@ def run_unit(config: dict, unit, out_root, fit_fn=None, position: int = None) ->
         "population": cond.population, "difficulty_shift": cond.difficulty_shift,
         "theta_kind": cond.theta_kind, "theta_shape": cond.theta_shape,
         "N": cond.N, "test_length": J, "world": cond.world, "tau_a": cond.tau_a,
-        "tau_b": cond.tau_b, "rho": cond.rho, "replicate": rep, "tier": fit["tier"],
+        "tau_b": cond.tau_b, "rho": cond.rho, "replicate": rep, "tier": canonical["tier"],
+        "initial_tier": initial_tier, "fallback_triggered": triggered,
+        "fallback_tier": protocol["fallback_tier"] or "", "canonical_parameterization": canonical_label,
         "item_id": range(J), "true_a": sim["a"], "true_b": sim["b"],
     })
-    for p in ("a", "b"):
-        for k in ("est", "lo", "hi", "sd"):
-            rows[f"{k}_{p}"] = fit.get(f"{k}_{p}", nan)
-        rows[f"rhat_{p}"] = fit.get(f"rhat_{p}", nan)
-    rows["est_log_a"] = fit.get("est_log_a", nan)
+    for k in ITEM_KEYS:                                       # canonical estimates (used by metrics)
+        rows[k] = canonical.get(k, nan)
+    for kind, fit in fits.items():                            # every attempt, preserved
+        for k in ITEM_KEYS:
+            rows[f"{LABEL[kind]}__{k}"] = fit.get(k, nan)
     pq.parent.mkdir(parents=True, exist_ok=True)
     tmp = pq.with_name(pq.name + ".tmp")
     rows.to_parquet(tmp, index=False)
     os.replace(tmp, pq)
-    keys = ("tier", "error", "seconds", "backend", "rhat_max", "ess_bulk_min", "ess_tail_min",
-            "rhat_max_group", "ess_bulk_min_group", "theta_rhat_max", "theta_ess_bulk_min",
-            "divergences", "divergence_share", "ebfmi_min", "treedepth_hits", "hyper")
     diag = {"unit_id": unit.unit_id, "block": unit.block, "condition_id": cond.condition_id,
             "replicate": rep, "scientific_hash": unit_scientific_hash(config, cond),
+            "simulation_hash": simulation_hash(config, cond),
             "sampler_seed": sim["sampler_seed"], "item_tries": sim["item_tries"],
             "observed_p_correct": float(sim["Y"].mean()),
-            **{k: fit.get(k) for k in keys},
+            **{k: canonical.get(k) for k in DIAG_KEYS},           # canonical diagnostics
+            "seconds_total": float(sum((f.get("seconds") or 0.0) for f in fits.values())),
+            "fit_protocol": protocol, "attempts": attempts,
             "package_version": __version__, "python": platform.python_version(),
             "platform": platform.platform(), "runner": runner_metadata(),
             "position_in_batch": position, "finished_at": _now()}
@@ -219,6 +295,7 @@ def collect(sources, out_root, study_id: str) -> dict:
             shutil.copy2(js.with_suffix(".parquet"), dup_dir / f"{stem}__{tag}.parquet")
             shutil.copy2(js, dup_dir / f"{stem}__{tag}.json")
             logged.append({"unit_id": canon_meta["unit_id"], "duplicate_source": str(js),
+                           "fit_protocol": [canon_meta.get("fit_protocol"), meta.get("fit_protocol")],
                            "canonical_runner": canon_meta.get("runner"), "duplicate_runner": meta.get("runner"),
                            "truth_max_abs_diff": truth, "max_abs_diff": diffs,
                            "rhat_max": [canon_meta.get("rhat_max"), meta.get("rhat_max")],
@@ -228,8 +305,21 @@ def collect(sources, out_root, study_id: str) -> dict:
         with (sdir / "collect_duplicates.jsonl").open("a", encoding="utf-8") as f:
             for rec in logged:
                 f.write(json.dumps(rec, default=float) + "\n")
+    failures = 0                                           # failure records are preserved too
+    for src in sorted(map(str, sources)):
+        for fj in sorted(Path(src).rglob("rep_*__*.json")):
+            if fj.parent.parent.name != "failures" or fj.parent.parent.parent.name != study_id:
+                continue
+            if Path(out_root).resolve() in fj.resolve().parents:
+                continue
+            dst = sdir / "failures" / fj.parent.name / fj.name
+            if not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(fj, dst)
+                failures += 1
     return {"copied": copied, "same_execution_copies": same_execution,
-            "logged_duplicate_executions": len(logged), "previously_logged_duplicates": already_logged}
+            "logged_duplicate_executions": len(logged), "previously_logged_duplicates": already_logged,
+            "failure_records": failures}
 
 
 def run_units(config: dict, units: list, out_root, fit_fn=None, log=print) -> dict:
@@ -248,11 +338,15 @@ def run_units(config: dict, units: list, out_root, fit_fn=None, log=print) -> di
         try:
             d = run_unit(config, unit, out_root, fit_fn, position=done + 1)
             done += 1
-            if d["error"]:
-                sampler_errors.append(unit.unit_id)          # recorded as a gross fit, and reported
+            p = d["fit_protocol"]
             log(f"[{_now()}] {k}/{len(units)} {unit.unit_id}: tier={d['tier']} "
-                f"{(d['seconds'] or 0):.1f}s rhat={d['rhat_max']} div={d['divergences']}"
-                + (f" ERROR {d['error']}" if d["error"] else ""))
+                f"({p['initial_parameterization']} {p['initial_tier']}"
+                + (f" -> fallback {p['fallback_tier']}" if p["fallback_triggered"] else "")
+                + f"; canonical {p['canonical_parameterization']}) {d['seconds_total']:.1f}s "
+                f"rhat={d['rhat_max']} div={d['divergences']}")
+        except UnitFailure as exc:                         # sampler/program error: kept, retryable
+            sampler_errors.append(unit.unit_id)
+            log(f"[{_now()}] {unit.unit_id} FAILED ({exc.kind}): {exc}")
         except Exception as exc:                                   # noqa: BLE001
             crashed += 1
             failures.append(unit.unit_id)

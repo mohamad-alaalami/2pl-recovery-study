@@ -49,17 +49,40 @@ Blocks in `configs/final_v1.yaml`:
   - centered b ~ N(μ_b, σ_b);
   - half-normal hierarchical SDs;
   - 4 chains × (1,000 tune + 1,000 draws), target_accept 0.95.
-- **Fit tiers.** Every fit is kept and classified:
+- **Fit tiers (Policy D).** Every fit is kept and classified, first match wins:
 
   | Tier | Rule |
   |---|---|
-  | gross | sampler error, non-finite estimates, or R-hat > 1.1 |
+  | gross | non-finite estimates, or R-hat > 1.1 |
   | divergent | any divergence |
   | mixing_flag | R-hat > 1.01, or bulk/tail ESS < 400 |
   | clean | otherwise |
 
-  - The primary results use every non-gross fit.
+  - The primary results use every non-gross canonical fit.
   - Sensitivity summaries use "no divergent" fits and "clean only" fits.
+  - Divergent fits that remain after the fallback are kept and flagged, never silently dropped.
+  - A sampler or program exception is not a gross fit: it is a failure. The unit is not written,
+    a failure record is kept, and the unit can be retried.
+- **Fit protocol: automatic non-centered fallback** (`estimator.fallback`, `recovery2pl.fallback`).
+  1. Fit the centered-b model and classify it.
+  2. If it is clean or mixing_flag, it is canonical.
+  3. If it is divergent or gross, refit the *same* dataset with non-centered b (b = μ_b + σ_b·z).
+     Everything else is identical: priors, likelihood, identification, sampler settings, seed.
+  4. The canonical fit is chosen by tier only (clean > mixing_flag > divergent > gross). Non-centered
+     wins only with a strictly better tier; ties keep centered.
+
+  - No other quantity enters the choice: not divergence counts, R-hat, ESS, E-BFMI, runtime,
+    recovery error, true parameters or condition labels. The rule therefore also works when true
+    parameters are unknown.
+  - This is a computational fallback for the same model and posterior, not a second estimator.
+  - Both attempts are stored. Every metric uses the canonical fit only.
+  - Validation, on the 18 divergent or gross centered fits of an 84-unit pre-check refitted
+    non-centered:
+    - 13 improved in tier, 5 unchanged, 0 worse;
+    - divergences 803 → 12;
+    - every gross fit rescued;
+    - RMSE(b) changed by at most 0.030 (mean about −0.0006), RMSE(log a) by at most 0.016;
+    - posterior shifts were small against posterior and replicate variability.
 - **Limitations:**
   - full exposure only;
   - unidimensional 2PL;
@@ -114,7 +137,16 @@ python -m recovery2pl plan --config configs/precheck_s1s2.yaml --shards 12 --str
 python -m recovery2pl collect --config configs/precheck_s1s2.yaml --from downloaded_artifacts --out results
 ```
 
-- `plan` writes a deterministic shard assignment.
+- `plan` writes a deterministic shard assignment, with conservative scheduling.
+  - Every unit is planned at its worst case: the centered fit plus a full fallback refit, because
+    which units trigger the fallback is unknown in advance.
+  - Fit time comes from a calibrated model (`units.expected_fit_seconds`), with a deliberately
+    high factor for the extreme world, plus per-job overhead.
+  - Balanced plans add shards until every shard's worst case fits `--max-shard-hours` (default 4 h,
+    against GitHub's 6 h job limit).
+  - Plans that would exceed the 256-job matrix limit are refused, so blocks must be planned
+    separately.
+  - `final_v1.yaml` needs 151 shards, each with a worst case of at most 4.0 h.
   - `balanced`: longest-job-first packing on a provisional relative cost model,
     `units.estimated_cost`, to be recalibrated from measured timings.
   - `round_robin` is the alternative.
@@ -147,8 +179,10 @@ Under `results/<study_id>/`:
 
 | File | Content |
 |---|---|
-| `units/<condition_id>/rep_XXX.parquet` | one row per item: true and estimated a and b, 95% interval, posterior SD, per-item R-hat, condition fields, fit tier |
-| `units/<condition_id>/rep_XXX.json` | fit diagnostics, tier, seeds, scientific hash, software versions. Written last: it marks the unit complete |
+| `units/<condition_id>/rep_XXX.parquet` | one row per item: true a and b; the canonical estimate, 95% interval, posterior SD and per-item R-hat; condition fields; canonical tier; fit-protocol fields (`initial_tier`, `fallback_triggered`, `fallback_tier`, `canonical_parameterization`); and every attempt's item estimates as `<centered_b\|noncentered_b>__<column>` |
+| `units/<condition_id>/rep_XXX.json` | canonical diagnostics and tier; the `fit_protocol` block (initial and fallback tiers, canonical choice, reason); per-attempt diagnostics, runtime and runner/CPU metadata under `attempts`; seeds; scientific hash and simulation hash; software versions. Written last: it marks the unit complete |
+| `failures/<condition_id>/rep_XXX__<time>.json` | a sampler or program failure, with the attempts so far. The unit itself stays pending, so it can be retried |
+| `fallback_report.csv` | per condition: fallback triggered, rescued and unresolved counts, trigger rate, canonical centered vs non-centered counts, initial and canonical tier counts |
 | `replicate_metrics.csv` | one row per unit: RMSE, bias, coverage, interval width, share of items within the configured tolerances, correlation, rank correlation, shrinkage slope, for b, a and log a |
 | `summary_{primary,no_divergent,strict}.csv` | per condition, for every metric: mean, SD across replicates, Monte Carlo SE (SD/√R), median, 5th/10th/90th/95th percentiles, pooled RMSE, tier counts |
 | `envelope_<name>_<metric>.csv` | per N, the maximum over a configured set of conditions of the condition mean, and which condition attained it |
@@ -169,6 +203,14 @@ current config is never overwritten.
   - On a different CPU model, compiled code and vectorised math can round differently in the
     last bits. NUTS then follows a different path, so posterior summaries differ by Monte Carlo
     error, as with a different seed.
+- **Two identities per unit.**
+  - The *simulation hash* (seed base, item generator, world, population, condition) plus the
+    replicate index fixes the generated dataset.
+  - The *scientific hash* adds the estimator, including its fallback protocol, and the diagnostic
+    rules.
+  - Results produced under the earlier centered-only protocol therefore keep their own hashes and
+    can never be mistaken for final-study results. They still share the simulation hash, because
+    they come from the same data.
 - **Each scientific unit therefore has one canonical result.** `collect`:
   - keeps an already-collected copy, otherwise the earliest-finished one;
   - never averages or overwrites;
