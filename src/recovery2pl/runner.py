@@ -74,8 +74,10 @@ def _default_fit(Y, config, seed):
                    cores=config["execution"]["chain_cores"])
 
 
-def run_unit(config: dict, unit, out_root, fit_fn=None) -> dict:
-    """Simulate + fit + persist one unit. `fit_fn(Y, config, seed) -> dict` is injectable (tests)."""
+def run_unit(config: dict, unit, out_root, fit_fn=None, position: int = None) -> dict:
+    """Simulate + fit + persist one unit. `fit_fn(Y, config, seed) -> dict` is injectable (tests).
+    `position` (1-based order within this process's batch) is recorded: the first fit of a fresh
+    process also pays the one-time C compilation."""
     fit_fn = fit_fn or _default_fit
     cond, rep = unit.condition, unit.replicate
     pq, js = unit_paths(out_root, config["study_id"], unit)
@@ -109,46 +111,125 @@ def run_unit(config: dict, unit, out_root, fit_fn=None) -> dict:
             "observed_p_correct": float(sim["Y"].mean()),
             **{k: fit.get(k) for k in keys},
             "package_version": __version__, "python": platform.python_version(),
-            "platform": platform.platform(), "finished_at": _now()}
+            "platform": platform.platform(), "runner": runner_metadata(),
+            "position_in_batch": position, "finished_at": _now()}
     _atomic_write_text(js, json.dumps(diag, indent=2, default=float))
     return diag
 
 
-def collect(sources, out_root, study_id: str, atol: float = 1e-8) -> dict:
-    """Merge unit results found anywhere under `sources` (e.g. downloaded artifact folders) into
-    <out_root>/<study_id>/units/. A unit already present is kept; a second copy (e.g. from a job
-    retry) must carry the same scientific hash and the same true parameters, and its estimates must
-    agree within `atol`, otherwise an error is raised. Nothing is overwritten."""
+def cpu_model() -> str:
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor() or "unknown"
+
+
+def runner_metadata() -> dict:
+    """Execution provenance (never part of the scientific hash)."""
+    env = os.environ
+    return {"cpu_model": cpu_model(), "cpu_count": os.cpu_count(), "machine": platform.machine(),
+            "github_run_id": env.get("GITHUB_RUN_ID"), "github_run_attempt": env.get("GITHUB_RUN_ATTEMPT"),
+            "github_job": env.get("GITHUB_JOB"), "shard": env.get("SHARD"),
+            "runner_name": env.get("RUNNER_NAME"), "runner_image": env.get("ImageOS"),
+            "runner_image_version": env.get("ImageVersion")}
+
+
+TRUTH_TOL = 1e-12      # simulated parameters must agree (rounding-level differences only)
+COMPARED = ("est_a", "est_b", "est_log_a", "lo_a", "hi_a", "lo_b", "hi_b")
+
+
+def _execution_key(js: Path) -> str:
+    """Byte digest of a unit's two files: copies of one execution are byte-identical."""
+    import hashlib
+    h = hashlib.sha256(js.read_bytes())
+    h.update(js.with_suffix(".parquet").read_bytes())
+    return h.hexdigest()
+
+
+def collect(sources, out_root, study_id: str) -> dict:
+    """Merge unit results found under `sources` (e.g. downloaded artifact folders) into
+    <out_root>/<study_id>/units/ with ONE canonical result per scientific unit.
+
+    Canonical copy: a unit already collected in <out_root> is never replaced; otherwise the copy
+    with the earliest `finished_at` (ties: lexicographically first source path). Copies of the SAME
+    execution (e.g. a shard artifact and the merged artifact) are recognized and ignored.
+
+    Other executions of the same unit (retries, reruns on another machine) must have the same
+    scientific hash and the same simulated parameters (within 1e-12) -- otherwise an error is raised.
+    Posterior summaries MAY differ (MCMC is not bit-reproducible across CPUs); they are never
+    averaged or overwritten: each such duplicate is preserved under <study>/duplicates/ and logged,
+    with its numeric differences, in <study>/collect_duplicates.jsonl."""
     import shutil
     import numpy as np
-    copied = duplicates = 0
-    for src in sources:
+    sdir = Path(out_root) / study_id
+    found = {}
+    for src in sorted(map(str, sources)):
         for js in sorted(Path(src).rglob("rep_*.json")):
             if js.parent.parent.name != "units" or js.parent.parent.parent.name != study_id:
                 continue
-            pq = js.with_suffix(".parquet")
-            if not pq.exists():
-                continue
-            dst_dir = Path(out_root) / study_id / "units" / js.parent.name
-            dst_js, dst_pq = dst_dir / js.name, dst_dir / pq.name
-            if dst_js.exists():
-                a, b = (json.loads(p.read_text(encoding="utf-8")) for p in (dst_js, js))
-                if a["scientific_hash"] != b["scientific_hash"]:
-                    raise RuntimeError(f"{js}: scientific hash differs from the collected copy")
-                ra, rb = pd.read_parquet(dst_pq), pd.read_parquet(pq)
-                for col in ("true_a", "true_b"):
-                    if not np.array_equal(ra[col].to_numpy(), rb[col].to_numpy()):
-                        raise RuntimeError(f"{js}: simulated {col} differs from the collected copy")
-                for col in ("est_a", "est_b"):
-                    if not np.allclose(ra[col], rb[col], rtol=0, atol=atol, equal_nan=True):
-                        raise RuntimeError(f"{js}: {col} differs beyond {atol} from the collected copy")
-                duplicates += 1
-                continue
+            if Path(out_root).resolve() in js.resolve().parents:
+                continue                                    # never re-read our own output tree
+            if js.with_suffix(".parquet").exists():
+                found.setdefault((js.parent.name, js.name), []).append(js)
+    copied = same_execution = already_logged = 0
+    logged = []
+    for (cond_dir, name), copies in sorted(found.items()):
+        metas = [(json.loads(p.read_text(encoding="utf-8")), p) for p in copies]
+        dst_dir = sdir / "units" / cond_dir
+        dst_js = dst_dir / name
+        if dst_js.exists():
+            canon_meta, canon_js = json.loads(dst_js.read_text(encoding="utf-8")), dst_js
+            others = metas
+        else:
+            metas.sort(key=lambda mp: (mp[0].get("finished_at") or "", str(mp[1])))
+            (canon_meta, src_js), others = metas[0], metas[1:]
             dst_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(pq, dst_pq)
-            shutil.copy2(js, dst_js)                       # json last: marks the unit complete
+            shutil.copy2(src_js.with_suffix(".parquet"), dst_js.with_suffix(".parquet"))
+            shutil.copy2(src_js, dst_js)                    # json last: marks the unit complete
+            canon_js = dst_js
             copied += 1
-    return {"copied": copied, "verified_duplicates": duplicates}
+        canon_rows = pd.read_parquet(canon_js.with_suffix(".parquet"))
+        seen_exec = {_execution_key(canon_js)}
+        for meta, js in others:
+            if meta["scientific_hash"] != canon_meta["scientific_hash"]:
+                raise RuntimeError(f"{js}: scientific hash differs from the canonical copy")
+            key = _execution_key(js)
+            if key in seen_exec:
+                same_execution += 1
+                continue
+            seen_exec.add(key)
+            rows = pd.read_parquet(js.with_suffix(".parquet"))
+            truth = max(float(np.max(np.abs(rows[c].to_numpy() - canon_rows[c].to_numpy())))
+                        for c in ("true_a", "true_b"))
+            if not truth <= TRUTH_TOL:
+                raise RuntimeError(f"{js}: simulated parameters differ from the canonical copy "
+                                   f"(max |diff| {truth:.3e}); not the same scientific dataset")
+            diffs = {c: float(np.nanmax(np.abs(rows[c].to_numpy() - canon_rows[c].to_numpy())))
+                     for c in COMPARED if c in rows and c in canon_rows}
+            tag = key[:12]                                  # deterministic: content digest
+            dup_dir = sdir / "duplicates" / cond_dir
+            stem = Path(name).stem
+            if (dup_dir / f"{stem}__{tag}.json").exists():
+                already_logged += 1                         # preserved by an earlier collect
+                continue
+            dup_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(js.with_suffix(".parquet"), dup_dir / f"{stem}__{tag}.parquet")
+            shutil.copy2(js, dup_dir / f"{stem}__{tag}.json")
+            logged.append({"unit_id": canon_meta["unit_id"], "duplicate_source": str(js),
+                           "canonical_runner": canon_meta.get("runner"), "duplicate_runner": meta.get("runner"),
+                           "truth_max_abs_diff": truth, "max_abs_diff": diffs,
+                           "rhat_max": [canon_meta.get("rhat_max"), meta.get("rhat_max")],
+                           "ess_bulk_min": [canon_meta.get("ess_bulk_min"), meta.get("ess_bulk_min")],
+                           "tier": [canon_meta.get("tier"), meta.get("tier")]})
+    if logged:
+        with (sdir / "collect_duplicates.jsonl").open("a", encoding="utf-8") as f:
+            for rec in logged:
+                f.write(json.dumps(rec, default=float) + "\n")
+    return {"copied": copied, "same_execution_copies": same_execution,
+            "logged_duplicate_executions": len(logged), "previously_logged_duplicates": already_logged}
 
 
 def run_units(config: dict, units: list, out_root, fit_fn=None, log=print) -> dict:
@@ -165,7 +246,7 @@ def run_units(config: dict, units: list, out_root, fit_fn=None, log=print) -> di
             skipped += 1
             continue
         try:
-            d = run_unit(config, unit, out_root, fit_fn)
+            d = run_unit(config, unit, out_root, fit_fn, position=done + 1)
             done += 1
             if d["error"]:
                 sampler_errors.append(unit.unit_id)          # recorded as a gross fit, and reported

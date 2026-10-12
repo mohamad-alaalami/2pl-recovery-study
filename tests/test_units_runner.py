@@ -134,22 +134,62 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             unit_status(changed, self.units[0], self.out)
 
-    def test_collect_merges_artifacts_and_verifies_duplicates(self):
+    def test_collect_keeps_one_canonical_result_and_logs_duplicate_executions(self):
+        import shutil
+        from recovery2pl.runner import collect
+
+        def other_cpu_fit(Y, config, seed):          # same unit, numerically different posterior
+            d = fake_fit(Y, config, seed)
+            d["est_b"] = d["est_b"] + 0.05
+            return d
+
+        a, b, c = (self.out / n for n in ("artifact_a", "artifact_b", "artifact_c"))
+        run_units(self.cfg, self.units[:2], a, fit_fn=fake_fit, log=lambda *_: None)
+        run_units(self.cfg, self.units[1:], b, fit_fn=other_cpu_fit, log=lambda *_: None)  # unit 1 twice
+        shutil.copytree(a, c)                        # a byte-identical copy of the same execution
+        merged = self.out / "merged"
+        res = collect([a, b, c], merged, "smoke")
+        self.assertEqual(res, {"copied": 3, "same_execution_copies": 2,
+                               "logged_duplicate_executions": 1, "previously_logged_duplicates": 0})
+        sdir = merged / "smoke"
+        self.assertEqual(len(list((sdir / "units").rglob("rep_*.json"))), 3)
+        # canonical = earliest finished (ties: first source path) -> artifact_a; never averaged
+        u1 = self.units[1]
+        canon = pd.read_parquet(unit_paths(merged, "smoke", u1)[0])
+        pd.testing.assert_frame_equal(canon, pd.read_parquet(unit_paths(a, "smoke", u1)[0]))
+        log = [json.loads(x) for x in (sdir / "collect_duplicates.jsonl").read_text().splitlines()]
+        self.assertEqual(len(log), 1)
+        self.assertAlmostEqual(log[0]["max_abs_diff"]["est_b"], 0.05, places=9)
+        self.assertEqual(log[0]["truth_max_abs_diff"], 0.0)
+        self.assertEqual(len(list((sdir / "duplicates").rglob("*.json"))), 1)
+        # collecting again changes nothing and does not re-log
+        res2 = collect([a, b, c], merged, "smoke")
+        self.assertEqual((res2["copied"], res2["logged_duplicate_executions"],
+                          res2["previously_logged_duplicates"]), (0, 0, 1))
+        pd.testing.assert_frame_equal(pd.read_parquet(unit_paths(merged, "smoke", u1)[0]), canon)
+
+    def test_collect_rejects_different_simulated_data_or_hash(self):
         from recovery2pl.runner import collect
         a, b = self.out / "artifact_a", self.out / "artifact_b"
-        run_units(self.cfg, self.units[:2], a, fit_fn=fake_fit, log=lambda *_: None)
-        run_units(self.cfg, self.units[1:], b, fit_fn=fake_fit, log=lambda *_: None)   # unit 1 twice
-        merged = self.out / "merged"
-        res = collect([a, b], merged, "smoke")
-        self.assertEqual(res, {"copied": 3, "verified_duplicates": 1})
-        self.assertEqual(len(list((merged / "smoke" / "units").rglob("rep_*.json"))), 3)
-        # a conflicting duplicate is rejected
-        pq = unit_paths(b, "smoke", self.units[1])[0]
+        run_units(self.cfg, self.units[:1], a, fit_fn=fake_fit, log=lambda *_: None)
+        run_units(self.cfg, self.units[:1], b, fit_fn=fake_fit, log=lambda *_: None)
+        pq, js = unit_paths(b, "smoke", self.units[0])
         rows = pd.read_parquet(pq)
-        rows["est_b"] += 0.1
+        rows["true_b"] += 1e-6
         rows.to_parquet(pq, index=False)
         with self.assertRaises(RuntimeError):
-            collect([b], merged, "smoke")
+            collect([a, b], self.out / "merged1", "smoke")
+        d = json.loads(js.read_text())
+        d["scientific_hash"] = "0" * 16
+        js.write_text(json.dumps(d))
+        with self.assertRaises(RuntimeError):
+            collect([a, b], self.out / "merged2", "smoke")
+
+    def test_unit_json_records_runner_metadata(self):
+        d = run_unit(self.cfg, self.units[0], self.out, fit_fn=fake_fit, position=1)
+        self.assertEqual(d["position_in_batch"], 1)
+        self.assertIn("cpu_model", d["runner"])
+        self.assertTrue(d["runner"]["cpu_model"])
 
     def test_aggregate_writes_replicate_metrics_summaries_and_envelopes(self):
         run_units(self.cfg, self.units, self.out, fit_fn=fake_fit, log=lambda *_: None)

@@ -118,9 +118,8 @@ python -m recovery2pl collect --config configs/precheck_s1s2.yaml --from downloa
   - `balanced`: longest-job-first packing on a provisional relative cost model,
     `units.estimated_cost`, to be recalibrated from measured timings.
   - `round_robin` is the alternative.
-- `collect` merges unit files from many shard outputs. A unit present twice (e.g. after a retry)
-  must have the same scientific hash and simulated parameters, and estimates within 1e-8;
-  otherwise it raises.
+- `collect` merges unit files from many shard outputs into one canonical result per unit (see
+  Reproducibility).
 - Shard assignment never affects results.
 
 ### GitHub Actions
@@ -159,10 +158,25 @@ current config is never overwritten.
 
 ## Reproducibility
 
-- **Simulated data are bit-identical** for a given unit on any machine with the pinned
-  dependencies. The tests check S0 datasets against frozen SHA-256 digests.
-- **MCMC results** for a given unit and seed agree within numerical tolerance on the same
-  software stack. They are not guaranteed to be byte-identical across platforms or compilers.
+- **Simulated data, seeds and work units are deterministic.**
+  - The response matrices Y and all seeds are identical everywhere.
+  - Item and ability parameters are bit-identical on the same platform, and agree within 1e-12
+    across operating systems. The measured Windows vs Linux difference is at most 9e-15: BLAS and
+    libm rounding.
+  - Tests check reference datasets against frozen arrays and digests.
+- **MCMC results are reproducible only up to Monte Carlo error across machines.**
+  - On the same machine, a unit rerun with the same seed reproduces exactly.
+  - On a different CPU model, compiled code and vectorised math can round differently in the
+    last bits. NUTS then follows a different path, so posterior summaries differ by Monte Carlo
+    error, as with a different seed.
+- **Each scientific unit therefore has one canonical result.** `collect`:
+  - keeps an already-collected copy, otherwise the earliest-finished one;
+  - never averages or overwrites;
+  - preserves other executions under `duplicates/` and logs them, with their numeric
+    differences, in `collect_duplicates.jsonl`;
+  - raises if a duplicate's scientific hash or simulated parameters differ.
+- Every unit json records the runner (CPU model, run, job, shard).
+- Results computed on different platforms should not be mixed within one study.
 
 ## Licensing
 
