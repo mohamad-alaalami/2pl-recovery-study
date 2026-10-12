@@ -28,6 +28,24 @@ class ModelStructureTests(unittest.TestCase):
         self.assertAlmostEqual(b.mean(), 0.0, delta=0.05)
 
 
+class NonCenteredDiagnosticVariantTests(unittest.TestCase):
+    def test_only_the_difficulty_parameterization_changes(self):
+        import pymc as pm
+        from recovery2pl.model import NONCENTERED
+        pri = load_config(CONFIGS / "final_v1.yaml")["estimator"]["priors"]
+        Y = np.random.default_rng(0).integers(0, 2, size=(20, 5)).astype("int8")
+        mc, mn = build_model(Y, pri), build_model(Y, pri, NONCENTERED)
+        fc, fn = {v.name for v in mc.free_RVs}, {v.name for v in mn.free_RVs}
+        self.assertEqual(fc ^ fn, {"b", "z_b"})                       # b <-> z_b swapped, nothing else
+        self.assertIn("z_a", fn)                                       # log a unchanged (non-centered)
+        bc = pm.draw(mc["b"], draws=20000, random_seed=1)              # same prior on b either way
+        bn = pm.draw(mn["b"], draws=20000, random_seed=1)
+        self.assertAlmostEqual(bc.mean(), bn.mean(), delta=0.03)
+        self.assertAlmostEqual(bc.std(), bn.std(), delta=0.03)
+        with self.assertRaises(ValueError):
+            build_model(Y, pri, "half_centered")
+
+
 def fit(**kw):
     d = {"error": None, "est_a": np.ones(3), "est_b": np.zeros(3), "rhat_max": 1.0,
          "ess_bulk_min": 1000.0, "ess_tail_min": 1000.0, "divergences": 0}

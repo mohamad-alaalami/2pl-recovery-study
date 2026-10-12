@@ -16,7 +16,8 @@ def final():
 
 class ConfigValidationTests(unittest.TestCase):
     def test_shipped_configs_are_valid(self):
-        for name in ("final_v1.yaml", "precheck_s1s2.yaml", "smoke.yaml"):
+        for name in ("final_v1.yaml", "precheck_s1s2.yaml", "smoke.yaml",
+                     "diagnostic_s1_small_lowN_noncentered_b.yaml"):
             load_config(CONFIGS / name)
 
     def test_rejections(self):
@@ -78,6 +79,29 @@ class UnitCountTests(unittest.TestCase):
             self.assertIn(u.unit_id, fin_units)
             self.assertEqual(unit_scientific_hash(pre, u.condition),
                              unit_scientific_hash(fin, fin_units[u.unit_id].condition))
+
+    def test_noncentered_diagnostic_reuses_the_canonical_datasets_but_never_their_hash(self):
+        import numpy as np
+        from recovery2pl.simulate import simulate_replicate
+        diag = load_config(CONFIGS / "diagnostic_s1_small_lowN_noncentered_b.yaml")
+        pre = load_config(CONFIGS / "precheck_s1s2.yaml")
+        du = enumerate_units(diag)
+        self.assertEqual(len(du), 12)
+        pu = {u.unit_id: u for u in enumerate_units(pre)}
+        fu = {u.unit_id for u in enumerate_units(final())}
+        for u in du:
+            self.assertEqual((u.condition.population, u.condition.world, u.condition.rho), ("S1", "small", 0.3))
+            self.assertIn(u.unit_id, pu)
+            self.assertIn(u.unit_id, fu)
+            a = simulate_replicate(diag, u.condition, u.replicate)
+            b = simulate_replicate(pre, pu[u.unit_id].condition, u.replicate)
+            for k in ("a", "b", "theta", "Y"):
+                np.testing.assert_array_equal(a[k], b[k])                   # identical dataset
+            self.assertEqual(a["sampler_seed"], b["sampler_seed"])
+            self.assertNotEqual(unit_scientific_hash(diag, u.condition),     # never mergeable
+                                unit_scientific_hash(pre, pu[u.unit_id].condition))
+        self.assertEqual({k: v for k, v in diag["estimator"].items() if k != "kind"},
+                         {k: v for k, v in pre["estimator"].items() if k != "kind"})
 
     def test_hash_ignores_layout_but_not_science(self):
         c = final()

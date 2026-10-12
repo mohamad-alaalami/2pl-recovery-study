@@ -1,0 +1,45 @@
+# DIAGNOSTIC ONLY -- not part of the study. Refits the 12 S1-small low-N units of final_v1 /
+# precheck_s1s2 (N 50/75/100 x J 25/50 x rho 0.3 x replicates 0-1) with a NON-CENTERED difficulty
+# hierarchy, to separate a parameterization (sampling-geometry) problem from genuine weak
+# identification. Simulated datasets, seeds, priors, sampler and diagnostics are identical to the
+# canonical centered fits; only estimator.kind differs (so the scientific hashes differ and the
+# results can never be merged into the centered study).
+study_id: s1_small_lowN_noncentered_b_diagnostic
+base_seed: 20261009
+
+item_generator:
+  kind: koenig2022
+  alpha_location: 1.0
+  beta_location: 0.0
+  aux_lower: [0.65, -4.5]
+  aux_upper: [4.0, 4.5]
+  accept_alpha: [0.45, 4.0]
+  accept_beta: [-4.5, 4.5]
+  center: truncated_mean
+  max_tries: 100000
+
+worlds:
+  small: {tau_alpha: 0.10, tau_beta: 0.40}
+
+populations:
+  S1: {difficulty_shift: -1.5, theta: {kind: normal}}
+
+blocks:
+  - {name: S1_small_lowN, population: S1, worlds: [small],
+     N: [50, 75, 100], test_length: [25, 50], rho: [0.3], replications: 2}
+
+estimator:
+  kind: hierarchical_2pl_noncentered_b
+  priors: {mu_log_a_mean: 0.0, mu_log_a_sd: 0.5, sigma_log_a_scale: 0.5,
+           mu_b_mean: 0.0, mu_b_sd: 1.0, sigma_b_scale: 1.0}
+  sampler: {chains: 4, tune: 1000, draws: 1000, target_accept: 0.95, interval: 0.95}
+
+diagnostics: {rhat_max: 1.01, ess_bulk_min: 400, ess_tail_min: 400, max_divergences: 0, gross_rhat: 1.1}
+
+reporting:
+  item_error_tolerances: [0.2]
+  envelopes: []
+
+execution:
+  chain_cores: 4
+  threads_per_process: 1

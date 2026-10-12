@@ -22,7 +22,8 @@ WORLD_FIELDS = ("tau_alpha", "tau_beta")
 POPULATION_FIELDS = ("difficulty_shift", "theta")
 THETA_FIELDS = {"normal": ("kind",), "skewnormal_standardized": ("kind", "shape")}
 BLOCK_FIELDS = ("name", "population", "worlds", "N", "test_length", "rho", "replications")
-ESTIMATOR_KIND = "hierarchical_2pl_centered_b"
+ESTIMATOR_KINDS = ("hierarchical_2pl_centered_b",      # the study's estimator
+                   "hierarchical_2pl_noncentered_b")   # diagnostic variant only
 PRIOR_FIELDS = ("mu_log_a_mean", "mu_log_a_sd", "sigma_log_a_scale", "mu_b_mean", "mu_b_sd",
                 "sigma_b_scale")
 SAMPLER_FIELDS = ("chains", "tune", "draws", "target_accept", "interval")
@@ -97,8 +98,8 @@ def _validate_population(name, p):
 
 def validate_estimator(est: dict) -> dict:
     _exact(est, ("kind", "priors", "sampler"), "estimator")
-    if est["kind"] != ESTIMATOR_KIND:
-        raise ConfigError(f"estimator.kind must be {ESTIMATOR_KIND!r}")
+    if est["kind"] not in ESTIMATOR_KINDS:
+        raise ConfigError(f"estimator.kind must be one of {ESTIMATOR_KINDS}")
     pr = est["priors"]
     _exact(pr, PRIOR_FIELDS, "estimator.priors")
     for f in PRIOR_FIELDS:

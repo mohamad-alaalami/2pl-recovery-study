@@ -9,6 +9,12 @@
 
 The model sees only the response matrix Y; true parameters are used afterwards, for recovery.
 
+estimator.kind selects the difficulty parameterization:
+    hierarchical_2pl_centered_b      b ~ N(mu_b, sigma_b)                 (the study's estimator)
+    hierarchical_2pl_noncentered_b   b = mu_b + sigma_b * z_b, z_b ~ N(0, 1)
+                                     (DIAGNOSTIC variant only: same model and posterior, different
+                                      sampling geometry; everything else identical)
+
 Diagnostics (Vehtari et al. 2021, rank-normalized): split R-hat, bulk-ESS and tail-ESS over every
 item parameter (a, b) and every hyperparameter; divergences; E-BFMI; max-treedepth hits; theta
 summarized separately (never used for the fit tier).
@@ -35,9 +41,12 @@ import pymc as pm  # noqa: E402
 
 GROUP_VARS = ["mu_log_a", "sigma_log_a", "mu_b", "sigma_b"]
 TIERS = ("clean", "mixing_flag", "divergent", "gross")
+CENTERED, NONCENTERED = "hierarchical_2pl_centered_b", "hierarchical_2pl_noncentered_b"
 
 
-def build_model(Y: np.ndarray, priors: dict) -> pm.Model:
+def build_model(Y: np.ndarray, priors: dict, kind: str = CENTERED) -> pm.Model:
+    if kind not in (CENTERED, NONCENTERED):
+        raise ValueError(f"unknown estimator kind {kind!r}")
     N, J = Y.shape
     with pm.Model() as model:
         mu_log_a = pm.Normal("mu_log_a", priors["mu_log_a_mean"], priors["mu_log_a_sd"])
@@ -46,7 +55,11 @@ def build_model(Y: np.ndarray, priors: dict) -> pm.Model:
         sigma_b = pm.HalfNormal("sigma_b", priors["sigma_b_scale"])
         z_a = pm.Normal("z_a", 0.0, 1.0, shape=J)
         a = pm.Deterministic("a", pm.math.exp(mu_log_a + sigma_log_a * z_a))
-        b = pm.Normal("b", mu_b, sigma_b, shape=J)
+        if kind == CENTERED:
+            b = pm.Normal("b", mu_b, sigma_b, shape=J)
+        else:
+            z_b = pm.Normal("z_b", 0.0, 1.0, shape=J)
+            b = pm.Deterministic("b", mu_b + sigma_b * z_b)
         theta = pm.Normal("theta", 0.0, 1.0, shape=N)
         pm.Bernoulli("y", logit_p=a[None, :] * (theta[:, None] - b[None, :]), observed=Y)
     return model
@@ -111,7 +124,7 @@ def fit_2pl(Y: np.ndarray, estimator: dict, rules: dict, seed: int, cores: int =
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with build_model(Y, estimator["priors"]):
+            with build_model(Y, estimator["priors"], estimator["kind"]):
                 idata = pm.sample(draws=s["draws"], tune=s["tune"], chains=s["chains"], cores=cores,
                                   target_accept=s["target_accept"], random_seed=seed,
                                   progressbar=False, compute_convergence_checks=False)
