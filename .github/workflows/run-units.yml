@@ -122,6 +122,7 @@ jobs:
           set -euo pipefail
           python -c "import json, os; s=[x for x in json.load(open('plan.json'))['shards'] if x['label']==os.environ['SHARD']][0]; open('units.txt','w').write('\n'.join(s['units'])+'\n')"
           cat units.txt
+          vmstat -t 5 > vmstat.log &              # CPU / memory utilisation every 5 s
           python -W ignore::FutureWarning -m recovery2pl run --config "$CONFIG" --units-file units.txt --out results 2>&1 | tee run.log
       - name: Upload shard results
         if: always()
@@ -133,6 +134,7 @@ jobs:
             runner_info.json
             units.txt
             run.log
+            vmstat.log
           if-no-files-found: error
           retention-days: 30
 

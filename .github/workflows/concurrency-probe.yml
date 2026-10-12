@@ -1,0 +1,48 @@
+name: concurrency-probe
+
+# Infrastructure check only (no science): how many hosted-runner jobs actually run at once.
+# Each job just records its start time and waits; overlap is computed from the job timestamps.
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "Number of parallel jobs to request"
+        required: true
+        default: "20"
+      wait_seconds:
+        description: "How long each job waits"
+        required: true
+        default: "180"
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      ids: ${{ steps.m.outputs.ids }}
+    steps:
+      - id: m
+        env:
+          N: ${{ inputs.jobs }}
+        run: echo "ids=$(python3 -c "import json, os; print(json.dumps(list(range(int(os.environ['N'])))))")" >> "$GITHUB_OUTPUT"
+
+  wait:
+    needs: matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 256
+      matrix:
+        id: ${{ fromJSON(needs.matrix.outputs.ids) }}
+    steps:
+      - env:
+          WAIT: ${{ inputs.wait_seconds }}
+        run: |
+          date -u +%FT%T
+          nproc; free -m | sed -n 2p
+          sleep "$WAIT"
+          date -u +%FT%T
