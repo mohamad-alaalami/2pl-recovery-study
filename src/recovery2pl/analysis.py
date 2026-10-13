@@ -373,7 +373,11 @@ def figures(sens: pd.DataFrame, tables: dict, s2: pd.DataFrame, conv: pd.DataFra
         _axes_n(ax); ax.set_ylim(0, None); ax.set_ylabel(names[metric])
         ax.set_title(f"main envelope by convergence subset — {names[metric]}", fontsize=10)
     axes[0].legend(fontsize=8, frameon=False)
-    fig.tight_layout()
+    fig.text(0.01, 0.01, "Main conservative envelope (max over S0, S1 x small, typical conditions of the condition-mean RMSE) "
+             "computed separately on three Policy-D subsets: all canonical fits (primary), excluding divergent fits, and "
+             "clean fits only.\nFiltering removes replicates non-randomly (e.g. 50 of 100 remain in the N = 50 driver cell "
+             "under 'clean only'); the primary subset is the headline.", fontsize=7.2, color="#555")
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
     p = out / "fig2_envelope_sensitivity.png"; fig.savefig(p, dpi=170); plt.close(fig); made.append(p)
 
     # C. condition-specific mean curves (main conditions), +-1.96 MC SE
@@ -390,7 +394,10 @@ def figures(sens: pd.DataFrame, tables: dict, s2: pd.DataFrame, conv: pd.DataFra
             _axes_n(ax); ax.set_title(f"{pop} — condition means (±1.96 MC SE)", fontsize=10)
             ax.legend(fontsize=7, frameon=False, ncol=2)
         axes[0].set_ylabel(metric.replace("rmse_", "RMSE ").replace("log_a", "log a"))
-        fig.tight_layout()
+        fig.text(0.01, 0.01, "Mean over replicates of the per-replicate RMSE for every main condition (sma = small, typ = "
+                 "typical item world; J = test length; ρ = corr(α, β)); bars = +-1.96 Monte Carlo SE of the mean. "
+                 "Primary subset; R = 100 per point.", fontsize=7.2, color="#555")
+        fig.tight_layout(rect=(0, 0.04, 1, 1))
         p = out / f"fig3_conditions_{metric}.png"; fig.savefig(p, dpi=170); plt.close(fig); made.append(p)
 
     # D. replicate variation (5th-95th percentile of replicate RMSE) for main conditions, rho 0.3
@@ -471,7 +478,10 @@ def figures(sens: pd.DataFrame, tables: dict, s2: pd.DataFrame, conv: pd.DataFra
         for ax in axes[:, col]: _axes_n(ax)
     axes[0][0].set_ylabel("fallback triggered, % of units\n(centered fit divergent or gross)")
     axes[1][0].set_ylabel("canonical fit divergent, % of units\n(after fallback)")
-    fig.tight_layout()
+    fig.text(0.01, 0.005, "Top: share of units whose centered-b fit was divergent or gross, triggering the non-centered-b "
+             "refit. Bottom: share whose canonical (selected) fit is still divergent; these stay in the primary subset, "
+             "flagged. One line per J x ρ condition; R = 100 (S0, S1 main), 50 (S2), 20 (extreme).", fontsize=7.2, color="#555")
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
     p = out / "fig7_convergence_fallback.png"; fig.savefig(p, dpi=170); plt.close(fig); made.append(p)
 
     # G. coverage
@@ -485,7 +495,10 @@ def figures(sens: pd.DataFrame, tables: dict, s2: pd.DataFrame, conv: pd.DataFra
     axes[0].set_ylabel("coverage")
     handles = [plt.Line2D([], [], color=c, label=k) for k, c in COL.items()]
     axes[1].legend(handles=handles, fontsize=7, frameon=False)
-    fig.tight_layout()
+    fig.text(0.01, 0.01, "Share of items whose 95% posterior interval contains the true value, averaged over replicates; one "
+             "line per condition (all J, ρ), colour = population x item world. Dashed line: nominal 0.95 (a reference, "
+             "not a threshold). Primary subset.", fontsize=7.2, color="#555")
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
     p = out / "fig8_coverage.png"; fig.savefig(p, dpi=170); plt.close(fig); made.append(p)
     return made
 
