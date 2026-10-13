@@ -187,6 +187,48 @@ Under `results/<study_id>/`:
 | `summary_{primary,no_divergent,strict}.csv` | per condition, for every metric: mean, SD across replicates, Monte Carlo SE (SD/√R), median, 5th/10th/90th/95th percentiles, pooled RMSE, tier counts |
 | `envelope_<name>_<metric>.csv` | per N, the maximum over a configured set of conditions of the condition mean, and which condition attained it |
 
+### Final analysis
+
+```
+python -m recovery2pl analyze --config configs/final_v1.yaml --out <merged root> --analysis-out <dir> [--precheck <study dir>]
+```
+
+`analyze` reads the unit files and the merged CSVs, and never writes inside the results tree it
+reads. It refuses an output directory inside it. It runs no fits. Scientific metrics come from each
+unit's canonical fit only.
+
+**Condition roles:**
+- **main:** S0 and S1 × small and typical worlds;
+- **stress:** S2, and the extreme world.
+
+**Main envelope.** Per subset (primary, no_divergent, strict) and metric:
+
+E(N) = max over main conditions of the condition-mean RMSE at N
+
+- the condition attaining it is recorded for every point;
+- no smoothing, and no forced monotonicity;
+- stress conditions never enter it;
+- it is the largest mean error observed across the tested main scenarios. It is not an expected
+  value, a confidence bound or a guarantee.
+
+**Uncertainty conventions:**
+- **between-replicate variation:** SD and 5th–95th percentiles of replicate-level metrics;
+- **uncertainty of a mean:** Monte Carlo SE, SD/√R.
+
+| Output | Content |
+|---|---|
+| `qa_checks.json` | automated checks (exit code 3 if any fails), covering: expected cells and replicate counts; canonical-attempt consistency; replicate metrics and summaries recomputed from unit files vs the merged files; Policy-D subset sizes; envelope = explicit max over main conditions; parquet vs JSON fallback fields; C backend; S1/S2 bank pairing |
+| `tables/conditions_<subset>.csv` | every condition × N: all metric statistics, tier and fallback counts, role, label |
+| `tables/envelope_sensitivity.csv` | per metric, N, subset: envelope value, MC SE, driving condition, replicates used, absolute and relative difference from primary |
+| `tables/main_lookup.csv` | per N: primary envelope for b and log a with driving condition and MC SE, plus no_divergent and strict values |
+| `tables/s2_vs_s1_paired.csv` | S2 minus S1 (typical, ρ 0.3), paired by J, N and replicate (same item banks) |
+| `tables/convergence_fallback.csv` | per condition × N: canonical tier rates, fallback trigger, rescue and unresolved counts |
+| `tables/coverage.csv` | per condition × N: 95% coverage of b and a, MC SE, deviation from 0.95 in MC SE units |
+| `tables/error_decomposition.csv` | share of replicate MSE that is a common shift of all items (identification offset) |
+| `tables/precheck_agreement.csv` | optional: centered tiers and RMSE vs an earlier centered-only execution of the same units |
+| `tables/replicate_metrics.parquet` | replicate-level metrics: every table and figure can be regenerated from it |
+| `figures/fig1`–`fig8` | main envelope; envelope by subset; condition curves; replicate variation; S2 vs S1; extreme world; convergence and fallback; coverage |
+
 Both unit files are written atomically. A unit whose stored scientific hash differs from the
 current config is never overwritten.
 

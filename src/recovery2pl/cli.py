@@ -8,6 +8,8 @@
   run         (--unit ID ... | --units-file F | --shard I/K) --out DIR
   collect     --from DIR [DIR ...] --out DIR          merge downloaded unit results (verifies duplicates)
   aggregate   --out DIR                               replicate metrics + summaries + envelopes
+  analyze     --out DIR --analysis-out DIR2 [--precheck DIR3]
+                                                      final tables, QA checks and figures (reads only)
 
 `run` and `aggregate` read and write only under --out. Thread caps for numerical libraries should
 be set in the environment before the process starts (e.g. OMP_NUM_THREADS=1).
@@ -79,7 +81,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="recovery2pl", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=["list-units", "shard", "show-unit", "plan", "run", "collect",
-                                        "aggregate"])
+                                        "aggregate", "analyze"])
     ap.add_argument("--shards", type=int)
     ap.add_argument("--strategy", default="balanced", choices=["balanced", "round_robin"])
     ap.add_argument("--json")
@@ -96,6 +98,8 @@ def main(argv=None) -> int:
     ap.add_argument("--units-file")
     ap.add_argument("--shard", help="I/K, e.g. 0/8")
     ap.add_argument("--out")
+    ap.add_argument("--analysis-out")
+    ap.add_argument("--precheck", help="study dir of an earlier centered-only pre-check (optional)")
     args = ap.parse_args(argv)
     config = load_config(args.config)
 
@@ -154,6 +158,13 @@ def main(argv=None) -> int:
         if not args.out:
             raise SystemExit("aggregate: give --out")
         print(json.dumps(cmd_aggregate(config, args.out)))
+    elif args.command == "analyze":
+        if not args.out or not args.analysis_out:
+            raise SystemExit("analyze: give --out and --analysis-out")
+        from recovery2pl.analysis import run_analysis
+        res = run_analysis(config, args.out, args.analysis_out, args.precheck)
+        print(json.dumps(res, indent=1))
+        return 0 if all(c["passed"] for c in res["checks"]) else 3
     return 0
 
 
